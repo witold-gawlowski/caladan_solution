@@ -4,11 +4,13 @@ import random
 import logging
 import contextlib
 import traceback
-
+import requests
 
 from datetime import datetime
 import asyncio
 from asyncio import Queue
+from queue import Queue as ThreadsafeQueue
+
 import aiohttp
 import async_timeout
 import threading
@@ -107,51 +109,47 @@ class RateLimiter:
         yield self
 
 
-
-async def request_sender(url: str, api_key: str, requestf: Request, session: aiohttp.ClientSession, logger: logging.Logger):
-    request = await requestf
+async def request_blocking(url: str, api_key: str, queue: ThreadsafeQueue, session: requests.Session, logger: logging.Logger):
+    request = queue.get()
     nonce = timestamp_ms()
     data = {'api_key': api_key, 'nonce': nonce, 'req_id': request.req_id}
-    async with session.request('GET', url, data=data) as resp:
-        return await resp.json()
-
-async def response_processor(task, logger: logging.Logger):
-    response = await task
-    if response['status'] == 'OK':
-        logger.info(f"API response: status {response['status']}, resp {response}")
+    response = session.get(url, params=data)
+    json = response.json()
+    if json['status'] == 'OK':
+        logger.info(f"API response: status {response.status_code}, resp {response}")
     else:
-        logger.warning(f"API response: status {response['status']}, resp {response}")
+        logger.warning(f"API response: status {response.status_code}, resp {response}")
+    queue.task_done()
 
-# ttl care i timeout
+# ttl care and timeout
 
-def every(delay, task):
-  next_time = time.time() + delay
-  while True:
-    time.sleep(max(0, next_time - time.time()))
-    try:
-      task()
-    except Exception:
-      traceback.print_exc()
-    next_time += (time.time() - next_time) // delay * delay + delay
+def exchange_facing_worker(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
+    while True:
+        threading.Thread(target=request_blocking, args=(url, api_key, queue, session, logger)).start()
+        time.sleep(DURATION_MS_BETWEEN_REQUESTS /  1000.0)
 
-async def handle_request(url: str, api_key: str, queue: Queue, logger: logging.Logger, session: aiohttp.ClientSession):
-        request_f = queue.get()
-        task = asyncio.create_task(request_sender(url, api_key, request_f, session, logger))
-        asyncio.create_task(response_processor(task, logger))
+async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: ThreadsafeQueue):
+    while True:
+        item = await async_queue.get()
+        threadsafe_queue.put(item)
+        async_queue.task_done()
 
 def main():
     url = "http://127.0.0.1:9999/api/request"
     loop = asyncio.get_event_loop()
     queue = Queue()
+    threadsafe_queue = ThreadsafeQueue()
+
+    loop.create_task(move_items_async_to_threadsafe(queue, threadsafe_queue))
 
     logger = configure_logger()
     loop.create_task(generate_requests(queue=queue))
 
-    for api_key in VALID_API_KEYS:
-        session = aiohttp.ClientSession()
-        handler = lambda: loop.create_task(handle_request(url=url, api_key=api_key, queue=queue, logger=logger, session=session))
-        threading.Thread(target=lambda: every(0.05, handler)).start()
 
+    for api_key in VALID_API_KEYS:
+        session = requests.Session()
+        threading.Thread(target=exchange_facing_worker, args=(url, api_key, threadsafe_queue, logger, session)).start()
+        
     loop.run_forever()
 
 
