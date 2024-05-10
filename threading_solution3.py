@@ -81,19 +81,18 @@ class Request:
 
 
 def request_blocking(url: str, api_key: str, request: Request, session: requests.Session, logger: logging.Logger, nonce: int):
-    request = Request(1)
     data = {'api_key': api_key, 'nonce': nonce, 'req_id': request.req_id}
-    response = requests.get(url, params=data)
+    print("id, nonce, timestamp", request.req_id, nonce, timestamp_ms())
+    response = requests.get(url, params=data, stream=False)
     json = response.json()
     if json['status'] == 'OK':
         logger.info(f"API response: status {response.status_code}, req_id {json['req_id']}")
     else:
-        logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}")
+        logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}", )
 
 # ttl care and timeout
 
 last_request_times = defaultdict(int)
-last_request_lock = threading.Lock()
 busy_wait_lock = threading.Lock()
 
 def exchange_facing_worker(url: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
@@ -101,17 +100,19 @@ def exchange_facing_worker(url: str, queue: ThreadsafeQueue, logger: logging.Log
     while True:
         busy_wait_lock.acquire()
         free_api_key = None
+        request = queue.get()
+        current_ts = None
         while free_api_key == None:
             current_ts = timestamp_ms()
             for api_key in VALID_API_KEYS:
                 if current_ts - last_request_times[api_key] > 50:
-                    request: Request = queue.get()
                     free_api_key = api_key
-                    last_request_times[api_key] = current_ts()
+                    print("request time delta", current_ts - last_request_times[api_key])
+                    last_request_times[api_key] = current_ts
                     busy_wait_lock.release()
                     break
         
-        request_blocking(url, api_key, request, session, logger, current_ts)
+        request_blocking(url, free_api_key, request, session, logger, current_ts)
 
 async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: ThreadsafeQueue):
     while True:
@@ -131,7 +132,7 @@ def main():
     loop.create_task(generate_requests(queue=queue))
 
     session = requests.Session()
-    for _ in range(1):
+    for _ in range(2):
         threading.Thread(target=exchange_facing_worker, args=(url, threadsafe_queue, logger, session)).start()
         
     loop.run_forever()

@@ -184,7 +184,6 @@ def exchange_facing_worker2(url: str, api_key: str, queue: ThreadsafeQueue, logg
 
 def exchange_facing_worker3(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
     while True:
-        print("timestamop", timestamp_ms())
         global last_request_time
         lock.acquire()
         request = None

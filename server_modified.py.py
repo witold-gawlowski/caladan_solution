@@ -55,7 +55,7 @@ def api_request():
 
     state = per_api_key_state[api_key]
     incoming_latency_ms = random.randint(0, MAX_LATENCY_MS)
-
+    print("reqid received before inc latency", request.args.get("req_id"), "ts", timestamp_ms())
     time.sleep(incoming_latency_ms / 1000.0)
 
     if state.error_429s >= MAX_429_REJECTS:
