@@ -11,7 +11,7 @@ from datetime import datetime
 import asyncio
 from asyncio import Queue
 from queue import Queue as ThreadsafeQueue
-
+from urllib import request as urlrequests
 import aiohttp
 import async_timeout
 import threading
@@ -83,22 +83,23 @@ class Request:
 def request_blocking(url: str, api_key: str, request: Request, session: requests.Session, logger: logging.Logger, nonce: int):
     data = {'api_key': api_key, 'nonce': nonce, 'req_id': request.req_id}
     print("id, nonce, timestamp", request.req_id, nonce, timestamp_ms())
-    new_session = requests.Session()
-    response = new_session.get(url, params=data, stream=True)
-    json = response.json()
-    if json['status'] == 'OK':
-        logger.info(f"API response: status {response.status_code}, req_id {json['req_id']}")
-    else:
-        logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}", )
+    with urlrequests.urlopen('https://api.example.com/data') as response:
+        rdata = response.read()
+        print(rdata)  # Print the response body
+    # response = requests.get(url, params=data)
+    # json = response.json()
+    # if json['status'] == 'OK':
+    #     logger.info(f"API response: status {response.status_code}, req_id {json['req_id']}")
+    # else:
+    #     logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}", )
 
 # ttl care and timeout
 
 last_request_times = defaultdict(int)
 busy_wait_lock = threading.Lock()
 
-def exchange_facing_worker(url: str, queue: ThreadsafeQueue, logger: logging.Logger):
+def exchange_facing_worker(url: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
     global last_request_times
-    session = requests.Session()
     while True:
         busy_wait_lock.acquire()
         free_api_key = None
@@ -133,8 +134,9 @@ def main():
     logger = configure_logger()
     loop.create_task(generate_requests(queue=queue))
 
+    session = requests.Session()
     for _ in range(2):
-        threading.Thread(target=exchange_facing_worker, args=(url, threadsafe_queue, logger)).start()
+        threading.Thread(target=exchange_facing_worker, args=(url, threadsafe_queue, logger, session)).start()
         
     loop.run_forever()
 

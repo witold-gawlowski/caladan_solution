@@ -6,15 +6,15 @@ import contextlib
 import traceback
 import requests
 from collections import defaultdict
+import multiprocessing
 
 from datetime import datetime
 import asyncio
 from asyncio import Queue
-from queue import Queue as ThreadsafeQueue
+from multiprocessing import Queue as MPQueue
 
 import aiohttp
 import async_timeout
-import threading
 
 
 # region: DO NOT CHANGE - the code within this region can be assumed to be "correct"
@@ -67,7 +67,7 @@ def configure_logger(name=None):
         fh.setFormatter(formatter)
         logger.addHandler(fh)
 
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
     return logger
 
 
@@ -84,9 +84,10 @@ def request_blocking(url: str, api_key: str, request: Request, session: requests
     data = {'api_key': api_key, 'nonce': nonce, 'req_id': request.req_id}
     print("id, nonce, timestamp", request.req_id, nonce, timestamp_ms())
     new_session = requests.Session()
-    response = new_session.get(url, params=data, stream=True)
+    response = new_session.get(url, params=data)
     json = response.json()
     if json['status'] == 'OK':
+        print("OK", datetime.now())
         logger.info(f"API response: status {response.status_code}, req_id {json['req_id']}")
     else:
         logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}", )
@@ -94,9 +95,9 @@ def request_blocking(url: str, api_key: str, request: Request, session: requests
 # ttl care and timeout
 
 last_request_times = defaultdict(int)
-busy_wait_lock = threading.Lock()
+busy_wait_lock = multiprocessing.Lock()
 
-def exchange_facing_worker(url: str, queue: ThreadsafeQueue, logger: logging.Logger):
+def exchange_facing_worker(url: str, queue: MPQueue, logger: logging.Logger):
     global last_request_times
     session = requests.Session()
     while True:
@@ -116,7 +117,7 @@ def exchange_facing_worker(url: str, queue: ThreadsafeQueue, logger: logging.Log
         
         request_blocking(url, free_api_key, request, session, logger, current_ts)
 
-async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: ThreadsafeQueue):
+async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: MPQueue):
     while True:
         item = await async_queue.get()
         threadsafe_queue.put(item)
@@ -126,7 +127,7 @@ def main():
     url = "http://127.0.0.1:9999/api/request"
     loop = asyncio.get_event_loop()
     queue = Queue()
-    threadsafe_queue = ThreadsafeQueue()
+    threadsafe_queue = MPQueue()
 
     loop.create_task(move_items_async_to_threadsafe(queue, threadsafe_queue))
 
@@ -134,7 +135,7 @@ def main():
     loop.create_task(generate_requests(queue=queue))
 
     for _ in range(2):
-        threading.Thread(target=exchange_facing_worker, args=(url, threadsafe_queue, logger)).start()
+        multiprocessing.Process(target=exchange_facing_worker, args=(url, threadsafe_queue, logger)).start()
         
     loop.run_forever()
 
