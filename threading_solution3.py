@@ -5,6 +5,7 @@ import logging
 import contextlib
 import traceback
 import requests
+from collections import defaultdict
 
 from datetime import datetime
 import asyncio
@@ -78,41 +79,9 @@ class Request:
         self.req_id = req_id
         self.create_time = timestamp_ms()
 
-class RateLimiter:
-    def __init__(self, per_second_rate, min_duration_ms_between_requests):
-        self.__per_second_rate = per_second_rate
-        self.__min_duration_ms_between_requests = min_duration_ms_between_requests
-        self.__last_request_time = 0
-        self.__request_times = [0] * per_second_rate
-        self.__curr_idx = 0
 
-    @contextlib.asynccontextmanager
-    async def acquire(self, timeout_ms=0):
-        enter_ms = timestamp_ms()
-        while True:
-            now = timestamp_ms()
-            if now - enter_ms > timeout_ms > 0:
-                raise RateLimiterTimeout()
-
-            if now - self.__last_request_time <= self.__min_duration_ms_between_requests:
-                await asyncio.sleep(0.001)
-                continue
-
-            if now - self.__request_times[self.__curr_idx] <= 1000:
-                await asyncio.sleep(0.001)
-                continue
-
-            break
-
-        self.__last_request_time = self.__request_times[self.__curr_idx] = now
-        self.__curr_idx = (self.__curr_idx + 1) % self.__per_second_rate
-        yield self
-
-
-def request_blocking(url: str, api_key: str, queue: ThreadsafeQueue, session: requests.Session, logger: logging.Logger):
-    request = queue.get()
-    nonce = timestamp_ms()
-    print("sent time", datetime.now())
+def request_blocking(url: str, api_key: str, request: Request, session: requests.Session, logger: logging.Logger, nonce: int):
+    request = Request(1)
     data = {'api_key': api_key, 'nonce': nonce, 'req_id': request.req_id}
     response = requests.get(url, params=data)
     json = response.json()
@@ -120,14 +89,29 @@ def request_blocking(url: str, api_key: str, queue: ThreadsafeQueue, session: re
         logger.info(f"API response: status {response.status_code}, req_id {json['req_id']}")
     else:
         logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}")
-    queue.task_done()
 
 # ttl care and timeout
 
-def exchange_facing_worker(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
+last_request_times = defaultdict(int)
+last_request_lock = threading.Lock()
+busy_wait_lock = threading.Lock()
+
+def exchange_facing_worker(url: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
+    global last_request_times
     while True:
-        threading.Thread(target=request_blocking, args=(url, api_key, queue, session, logger)).start()
-        time.sleep(DURATION_MS_BETWEEN_REQUESTS /  1000.0)
+        busy_wait_lock.acquire()
+        free_api_key = None
+        while free_api_key == None:
+            current_ts = timestamp_ms()
+            for api_key in VALID_API_KEYS:
+                if current_ts - last_request_times[api_key] > 50:
+                    request: Request = queue.get()
+                    free_api_key = api_key
+                    last_request_times[api_key] = current_ts()
+                    busy_wait_lock.release()
+                    break
+        
+        request_blocking(url, api_key, request, session, logger, current_ts)
 
 async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: ThreadsafeQueue):
     while True:
@@ -146,10 +130,9 @@ def main():
     logger = configure_logger()
     loop.create_task(generate_requests(queue=queue))
 
-
-    for api_key in VALID_API_KEYS:
-        session = requests.Session()
-        threading.Thread(target=exchange_facing_worker, args=(url, api_key, threadsafe_queue, logger, session)).start()
+    session = requests.Session()
+    for _ in range(1):
+        threading.Thread(target=exchange_facing_worker, args=(url, threadsafe_queue, logger, session)).start()
         
     loop.run_forever()
 

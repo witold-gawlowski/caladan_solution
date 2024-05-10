@@ -109,10 +109,8 @@ class RateLimiter:
         yield self
 
 
-def request_blocking(url: str, api_key: str, queue: ThreadsafeQueue, session: requests.Session, logger: logging.Logger):
-    request = queue.get()
-    nonce = timestamp_ms()
-    print("sent time", datetime.now())
+def request_blocking(url: str, api_key: str, request: Request, session: requests.Session, logger: logging.Logger, nonce: int):
+    request = Request(1)
     data = {'api_key': api_key, 'nonce': nonce, 'req_id': request.req_id}
     response = requests.get(url, params=data)
     json = response.json()
@@ -120,14 +118,83 @@ def request_blocking(url: str, api_key: str, queue: ThreadsafeQueue, session: re
         logger.info(f"API response: status {response.status_code}, req_id {json['req_id']}")
     else:
         logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}")
-    queue.task_done()
 
 # ttl care and timeout
 
+last_request_time = timestamp_ms()
+lock = threading.Lock()
+
 def exchange_facing_worker(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
+    global last_request_time
     while True:
-        threading.Thread(target=request_blocking, args=(url, api_key, queue, session, logger)).start()
-        time.sleep(DURATION_MS_BETWEEN_REQUESTS /  1000.0)
+        lock.acquire()
+        request = None
+        cd_complete = timestamp_ms() - last_request_time > 50
+        if cd_complete and not queue.empty():
+            request: Request = queue.get_nowait()
+            print("time delta", timestamp_ms() - last_request_time, "req_id", request.req_id)
+            last_request_time = timestamp_ms()
+        lock.release()
+
+        if request is not None:
+            request_blocking(url, api_key, request, session, logger, last_request_time)
+        
+        time.sleep(0.001)
+
+def exchange_facing_worker2(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
+    def work():
+        global last_request_time
+        lock.acquire()
+        request = None
+        cd_complete = timestamp_ms() - last_request_time > 50
+        try_count = try_count + 1
+        if cd_complete and not queue.empty():
+            print("time delta", timestamp_ms() - last_request_time, "try count", try_count)
+            try_count = 0
+            request: Request = queue.get_nowait()
+            last_request_time = timestamp_ms()
+        lock.release()
+
+        if request is not None:
+            request_blocking(url, api_key, request, session, logger, last_request_time)
+
+        threading.Timer(0.001, work).start()
+
+    work()
+
+def exchange_facing_worker2(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
+    def work():
+        print("timestamop", timestamp_ms())
+        global last_request_time
+        lock.acquire()
+        request = None
+        if not queue.empty() and timestamp_ms() - last_request_time > 25:
+            request: Request = queue.get_nowait()
+            last_request_time = timestamp_ms()
+        lock.release()
+
+        if request is not None:
+            request_blocking(url, api_key, request, session, logger, last_request_time)
+
+        desired_wait_time = timestamp_ms() // 50 * 50 + 50 - timestamp_ms()
+        print("next deisred time",  timestamp_ms() // 50 * 50 + 50)
+        threading.Timer(desired_wait_time / 1000.0, work).start()
+
+    work()
+
+def exchange_facing_worker3(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
+    while True:
+        print("timestamop", timestamp_ms())
+        global last_request_time
+        lock.acquire()
+        request = None
+        if not queue.empty() and timestamp_ms() - last_request_time > 25:
+            request: Request = queue.get_nowait()
+            last_request_time = timestamp_ms()
+        lock.release()
+
+        if request is not None:
+            request_blocking(url, api_key, request, session, logger, last_request_time)
 
 async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: ThreadsafeQueue):
     while True:
@@ -149,7 +216,8 @@ def main():
 
     for api_key in VALID_API_KEYS:
         session = requests.Session()
-        threading.Thread(target=exchange_facing_worker, args=(url, api_key, threadsafe_queue, logger, session)).start()
+        for _ in range(1):
+            threading.Thread(target=exchange_facing_worker2, args=(url, api_key, threadsafe_queue, logger, session)).start()
         
     loop.run_forever()
 

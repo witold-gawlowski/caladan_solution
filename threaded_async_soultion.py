@@ -122,11 +122,14 @@ def request_blocking(url: str, api_key: str, queue: ThreadsafeQueue, session: re
         logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}")
     queue.task_done()
 
+
+async def request_future(url: str, api_key: str, queue: ThreadsafeQueue, session: requests.Session, logger: logging.Logger):
+
 # ttl care and timeout
 
 def exchange_facing_worker(url: str, api_key: str, queue: ThreadsafeQueue, logger: logging.Logger, session: requests.Session):
     while True:
-        threading.Thread(target=request_blocking, args=(url, api_key, queue, session, logger)).start()
+        
         time.sleep(DURATION_MS_BETWEEN_REQUESTS /  1000.0)
 
 async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: ThreadsafeQueue):

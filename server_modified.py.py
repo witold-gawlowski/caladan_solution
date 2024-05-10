@@ -49,8 +49,7 @@ MAX_429_REJECTS = 10
 @app.route("/api/request", methods=["GET"])
 def api_request():
     req_start_time = timestamp_ms()
-    api_key = request.form.get('api_key') 
-
+    api_key = request.args.get('api_key') 
     if api_key not in VALID_API_KEYS:
         return abort(401)
 
@@ -66,8 +65,8 @@ def api_request():
         state.error_429s += 1
         return abort(429)
 
-    nonce = request.form.get('nonce')
-    req_id = request.form.get('req_id')
+    nonce = request.args.get('nonce')
+    req_id = request.args.get('req_id')
     try:
         nonce = int(nonce)
         if nonce <= state.prev_nonce:
