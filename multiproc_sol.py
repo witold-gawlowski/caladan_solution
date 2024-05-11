@@ -12,7 +12,7 @@ from datetime import datetime
 import asyncio
 from asyncio import Queue
 from multiprocessing import Queue as MPQueue
-
+from multiprocessing import Lock
 import aiohttp
 import async_timeout
 
@@ -90,31 +90,33 @@ def request_blocking(url: str, api_key: str, request: Request, session: requests
         print("OK", datetime.now())
         logger.info(f"API response: status {response.status_code}, req_id {json['req_id']}")
     else:
+        print("ERROR", response.status_code)
         logger.warning(f"API response: status {response.status_code}, resp {json['error_msg']}", )
 
 # ttl care and timeout
 
-last_request_times = defaultdict(int)
-busy_wait_lock = multiprocessing.Lock()
-
-def exchange_facing_worker(url: str, queue: MPQueue, logger: logging.Logger):
-    global last_request_times
+def exchange_facing_worker(url: str, queue: MPQueue, logger: logging.Logger, worker_id: int,
+                           busy_wait_lock: multiprocessing.Lock,
+                           last_request_times):
     session = requests.Session()
     while True:
         busy_wait_lock.acquire()
+        print("acuqiring lock at", timestamp_ms(), "by", worker_id)
         free_api_key = None
         request = queue.get()
         current_ts = None
         while free_api_key == None:
             current_ts = timestamp_ms()
+            #print("trying at", current_ts, "by", worker_id)
             for api_key in VALID_API_KEYS:
                 if current_ts - last_request_times[api_key] > 50:
+                    #print("success at", current_ts)
                     free_api_key = api_key
-                    print("request time delta", current_ts - last_request_times[api_key])
                     last_request_times[api_key] = current_ts
+                    print("releaseing lock at", timestamp_ms(), "by", worker_id)
                     busy_wait_lock.release()
                     break
-        
+        print("before requesting", timestamp_ms(), "by", worker_id)
         request_blocking(url, free_api_key, request, session, logger, current_ts)
 
 async def move_items_async_to_threadsafe(async_queue: Queue, threadsafe_queue: MPQueue):
@@ -133,9 +135,15 @@ def main():
 
     logger = configure_logger()
     loop.create_task(generate_requests(queue=queue))
+    busy_wait_lock = multiprocessing.Lock()
+    manager = multiprocessing.Manager()
+    last_request_times = manager.dict()
+    for api_key in VALID_API_KEYS:
+        last_request_times[api_key] = 0
 
-    for _ in range(2):
-        multiprocessing.Process(target=exchange_facing_worker, args=(url, threadsafe_queue, logger)).start()
+    for _ in range(5):
+        multiprocessing.Process(target=exchange_facing_worker, args=(url, threadsafe_queue, logger, _,
+                                                                     busy_wait_lock, last_request_times)).start()
         
     loop.run_forever()
 
