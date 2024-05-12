@@ -1,0 +1,19 @@
+The solution aims to send messages every 52.5 ms. In this way: 
+* we wont be hiting nonce error ever
+* we wont be hitting rate limit error because there are 19 windows of size 52.5 in a second and with the most unlucky latency values
+ we could get at most 20 in a second ( i will be happy to prove that more precisely if you like)
+
+Sending messages every 52.5 ms is quite close to optimal. It allows for sending 19 messages per second.
+My intuition is that the theoretical limit to this task is close to 19, due to the latency.
+I will be happy to prove that formally if given more time. Therefore I believe that my solution is close to optimal.
+
+To achieve it I used multiprocessing because It is known to be closest to real threads and therefore have most predicatable behaviour. 
+To be as close to sending message exactly every 52.5 ms I decided to use busy wait because as to my knowledge this is most precise solution.
+To limit processor use I am using a lock to ensure that only one process is in a busy wait at a time. 
+
+To be more precise: my solution creates 15 equal workers, each trying to get busy_wait_lock. When a process gets it,
+it takes request from the queue, and waits in a busy way for 52.5 ms to pass since last call on any of the keys. Then it sends 
+a request in a blocking way. 
+
+I understand that my solution may be missing coding standards. I focused on optimization and I have spent a lot of time on this.
+I will be happy to make the solution also fill the standards if given some more time. 
