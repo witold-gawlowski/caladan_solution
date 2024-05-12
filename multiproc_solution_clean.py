@@ -2,16 +2,13 @@ import sys
 import time
 import random
 import logging
-import requests
-from collections import defaultdict
-import multiprocessing
 
-from datetime import datetime
+import requests
 import asyncio
 from asyncio import Queue
+import multiprocessing
 from multiprocessing import Queue as MPQueue
 from multiprocessing import Lock
-
 
 # region: DO NOT CHANGE - the code within this region can be assumed to be "correct"
 
@@ -47,6 +44,9 @@ def timestamp_ms() -> int:
 
 # endregion
 
+WORKER_COUNT = 15
+TARGETED_REQUEST_PERIOD = 52.5
+
 def configure_logger(name=None):
     logger = logging.getLogger(name)
     if name is None:
@@ -64,17 +64,13 @@ def configure_logger(name=None):
         logger.setLevel(logging.INFO)
     return logger
 
-
-class RateLimiterTimeout(Exception):
-    pass
-
 class Request:
     def __init__(self, req_id):
         self.req_id = req_id
         self.create_time = timestamp_ms()
 
 
-def request_blocking(url: str, api_key: str, request: Request, session: requests.Session, logger: logging.Logger, nonce: int):
+def make_request(url: str, api_key: str, request: Request, session: requests.Session, logger: logging.Logger, nonce: int):
     data = {'api_key': api_key, 'nonce': nonce, 'req_id': request.req_id}
     response = session.get(url, params=data)
     json = response.json()
@@ -85,6 +81,12 @@ def request_blocking(url: str, api_key: str, request: Request, session: requests
 
 # ttl care and timeout
 
+def ttl_ok(request: Request):
+    remaining_ttl = REQUEST_TTL_MS - (timestamp_ms() - request.create_time)
+    if remaining_ttl <= 0:
+        return False
+    return True
+
 def exchange_facing_worker(url: str, queue: MPQueue, busy_wait_lock: multiprocessing.Lock,
                            last_request_times):
     session = requests.Session()
@@ -92,18 +94,33 @@ def exchange_facing_worker(url: str, queue: MPQueue, busy_wait_lock: multiproces
     while True:
         busy_wait_lock.acquire()
         free_api_key = None
-        request = queue.get()
+        request: Request = None
         current_ts = None
+        
+        while True:
+            request = queue.get()
+            if not ttl_ok(request):
+                logger.warning(f"ignoring request {request.req_id} from queue due to TTL")
+                continue
+            break
+            
         while free_api_key == None:
             current_ts = time.time() * 1000
-            for api_key in VALID_API_KEYS:
-                if current_ts - last_request_times[api_key] >= 52.5:
 
+            if not ttl_ok(request):
+                logger.warning(f"ignoring request {request.req_id} in rate limiter due to TTL")
+                busy_wait_lock.release()
+                break
+
+            for api_key in VALID_API_KEYS:
+                if current_ts - last_request_times[api_key] >= TARGETED_REQUEST_PERIOD:
                     free_api_key = api_key
                     last_request_times[api_key] = current_ts
                     busy_wait_lock.release()
                     break
-        request_blocking(url, free_api_key, request, session, logger, int(current_ts))
+
+        if free_api_key is not None:     
+            make_request(url, free_api_key, request, session, logger, int(current_ts))
 
 
 async def move_items_to_multiproc_queue(async_queue: Queue, mp_queue: MPQueue):
@@ -111,6 +128,8 @@ async def move_items_to_multiproc_queue(async_queue: Queue, mp_queue: MPQueue):
         item = await async_queue.get()
         mp_queue.put(item)
         async_queue.task_done()
+
+#TODO: add ttl care, request timeout
 
 def main():
     url = "http://127.0.0.1:9999/api/request"
@@ -130,7 +149,7 @@ def main():
     for api_key in VALID_API_KEYS:
         last_request_times[api_key] = 0
         
-    for _ in range(15):
+    for _ in range(WORKER_COUNT):
         multiprocessing.Process(target=exchange_facing_worker, args=(url, threadsafe_queue, busy_wait_lock, last_request_times)).start()
     loop.run_forever()
 
